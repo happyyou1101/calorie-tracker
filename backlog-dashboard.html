@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Backlog Dashboard</title>
+  <style>
+    :root { color-scheme: light; --ink:#182026; --muted:#5a6670; --line:#d9e0e6; --bg:#f6f8fb; --panel:#fff; --accent:#1769aa; --bad:#b42318; --ok:#177245; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: var(--bg); }
+    header { padding: 22px 28px 14px; background: #fff; border-bottom: 1px solid var(--line); }
+    h1 { margin: 0 0 12px; font-size: 24px; letter-spacing: 0; }
+    button, input, select { font: inherit; }
+    button { border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: 8px 12px; cursor: pointer; }
+    button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    input[type="search"] { width: min(420px, 100%); border: 1px solid var(--line); border-radius: 6px; padding: 9px 10px; }
+    select { border: 1px solid var(--line); border-radius: 6px; padding: 9px 10px; background: #fff; }
+    main { display: grid; grid-template-columns: minmax(300px, 470px) 1fr; gap: 18px; padding: 18px; min-height: calc(100vh - 128px); }
+    .bar { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+    .meta { display:grid; grid-template-columns: repeat(4, minmax(140px, 1fr)); gap: 10px; margin-top: 12px; }
+    .metric, .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+    .metric { padding: 12px; min-height: 78px; }
+    .metric b { display:block; font-size: 24px; margin-top: 6px; }
+    .label { color: var(--muted); font-size: 13px; }
+    .panel { overflow: hidden; }
+    .panel-head { padding: 12px; border-bottom: 1px solid var(--line); display:flex; gap:10px; align-items:center; justify-content:space-between; }
+    .task-list { height: calc(100vh - 252px); overflow:auto; }
+    .task { width:100%; display:grid; grid-template-columns: 82px 1fr auto; gap: 8px; align-items:center; border:0; border-bottom:1px solid var(--line); border-radius:0; padding:11px 12px; text-align:left; }
+    .task:hover, .task.active { background:#eef6fc; }
+    .id { font-weight:700; overflow-wrap:anywhere; }
+    .title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .pill { display:inline-flex; align-items:center; min-height:24px; border:1px solid var(--line); border-radius:999px; padding:2px 8px; font-size:12px; background:#fff; color:var(--muted); }
+    .unknown { color: var(--bad); border-color:#f1b3ad; background:#fff4f2; }
+    .detail { height: calc(100vh - 252px); overflow:auto; padding: 16px; }
+    .grid { display:grid; grid-template-columns: repeat(2, minmax(180px,1fr)); gap: 10px; }
+    .field { padding: 10px 0; border-bottom:1px solid var(--line); }
+    .field strong { display:block; margin-bottom:5px; font-size:13px; color:var(--muted); }
+    pre { margin: 8px 0 0; padding: 12px; background:#101820; color:#edf6ff; border-radius:6px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .notice { margin: 10px 0 0; padding: 10px 12px; border-radius: 6px; border:1px solid var(--line); background:#fff; }
+    .notice.error { color: var(--bad); border-color:#f1b3ad; background:#fff4f2; }
+    .notice.ok { color: var(--ok); border-color:#acd7be; background:#f1fff6; }
+    .doc-view { margin-top:14px; border-top:2px solid var(--line); padding-top:12px; }
+    @media (max-width: 860px) { main { grid-template-columns: 1fr; } .meta { grid-template-columns: repeat(2, 1fr); } .task-list, .detail { height:auto; max-height:none; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Backlog Dashboard</h1>
+    <div class="bar">
+      <input id="jsonInput" type="file" accept="application/json,.json">
+      <button id="reloadBtn" type="button">다시 읽기</button>
+      <input id="docInput" type="file" accept=".md,text/markdown,text/plain" multiple webkitdirectory>
+      <select id="statusFilter" aria-label="상태 필터"><option value="">전체 상태</option></select>
+      <input id="searchBox" type="search" placeholder="ID, 제목, 설명 검색">
+    </div>
+    <div id="fileMeta" class="notice">기준 백로그 JSON을 선택하세요. 파일은 브라우저 안에서만 읽고 수정하거나 업로드하지 않습니다.</div>
+    <section id="metrics" class="meta"></section>
+  </header>
+  <main>
+    <section class="panel">
+      <div class="panel-head"><strong>작업 목록</strong><span id="shownCount" class="label">0개 표시</span></div>
+      <div id="taskList" class="task-list"></div>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><strong>작업 상세</strong><span id="detailHint" class="label">작업을 선택하세요</span></div>
+      <div id="detail" class="detail"></div>
+    </section>
+  </main>
+  <script>
+    const state = { file:null, data:null, tasks:[], docs:new Map(), selectedId:null, errors:[] };
+    const el = id => document.getElementById(id);
+    const empty = v => v === null || v === undefined || v === "";
+    const text = (tag, value, cls) => { const n = document.createElement(tag); n.textContent = value; if (cls) n.className = cls; return n; };
+    const shown = (v, none="미지정") => empty(v) ? none : String(v);
+    const actual = v => !empty(v) && (!Array.isArray(v) || v.length) && (typeof v !== "object" || Array.isArray(v) || Object.keys(v).length);
+    const asArray = v => Array.isArray(v) ? v : [];
+
+    el("jsonInput").addEventListener("click", e => { e.target.value = ""; });
+    el("jsonInput").addEventListener("change", e => loadFile(e.target.files[0]));
+    el("reloadBtn").addEventListener("click", () => state.file ? loadFile(state.file) : el("jsonInput").click());
+    el("docInput").addEventListener("change", e => loadDocs(e.target.files));
+    el("statusFilter").addEventListener("change", render);
+    el("searchBox").addEventListener("input", render);
+
+    async function loadFile(file) {
+      if (!file) return;
+      state.file = file; state.selectedId = null;
+      const bytes = await file.arrayBuffer();
+      const body = new TextDecoder("utf-8", { fatal:false }).decode(bytes);
+      try { state.data = JSON.parse(body); }
+      catch (err) {
+        state.data = null; state.tasks = []; state.errors = ["JSON 파싱 오류: " + err.message];
+        el("fileMeta").className = "notice error";
+        el("fileMeta").textContent = `${file.name}을 읽었지만 JSON으로 해석할 수 없습니다. ${err.message}`;
+        render(); return;
+      }
+      state.tasks = Array.isArray(state.data.tasks) ? state.data.tasks : [];
+      state.errors = validate(state.data);
+      const hash = await sha256(bytes);
+      el("fileMeta").className = "notice ok";
+      el("fileMeta").textContent = `${file.name} · ${file.size} bytes · 수정 ${new Date(file.lastModified).toLocaleString()} · sha256 ${hash.slice(0,12)} · 읽은 시각 ${new Date().toLocaleString()}`;
+      render();
+    }
+
+    async function sha256(bytes) {
+      if (!crypto.subtle) return "정보 없음";
+      const hash = await crypto.subtle.digest("SHA-256", bytes);
+      return [...new Uint8Array(hash)].map(b => b.toString(16).padStart(2, "0")).join("");
+    }
+
+    async function loadDocs(files) {
+      state.docs.clear();
+      for (const file of files) {
+        const name = file.name || "";
+        if (!name.endsWith(".md")) continue;
+        state.docs.set(name.replace(/\.md$/i, ""), await file.text());
+      }
+      renderDetail();
+    }
+
+    function validate(data) {
+      const errors = [];
+      if (!data || typeof data !== "object" || Array.isArray(data)) return ["최상위가 JSON object가 아닙니다."];
+      if (!Array.isArray(data.tasks)) return ["tasks가 배열이 아닙니다."];
+      if (data.tasks.length === 0) errors.push("tasks가 비어 있습니다. 표시할 백로그 항목이 없습니다.");
+      const ids = new Set(data.tasks.map(t => t && t.id).filter(id => typeof id === "string"));
+      const statuses = new Set(asArray(data.enums && data.enums.status));
+      data.tasks.forEach((t, i) => {
+        const id = t && typeof t.id === "string" ? t.id : `#${i + 1}`;
+        if (!t || typeof t !== "object" || Array.isArray(t)) { errors.push(`${id}: task가 object가 아닙니다.`); return; }
+        if (!statuses.has(t.status)) errors.push(`${id}: 알 수 없는 상태 '${shown(t.status, "미지정")}'`);
+        if (!empty(t.parent) && !ids.has(t.parent)) errors.push(`${id}: 존재하지 않는 parent 참조 '${t.parent}'`);
+        if (!empty(t.deps) && !Array.isArray(t.deps)) errors.push(`${id}: deps가 배열이 아닙니다.`);
+        if (!empty(t.log) && !Array.isArray(t.log)) errors.push(`${id}: log가 배열이 아닙니다.`);
+        asArray(t.deps).forEach(dep => { if (!ids.has(dep)) errors.push(`${id}: 존재하지 않는 deps 참조 '${dep}'`); });
+      });
+      return errors;
+    }
+
+    function render() {
+      renderStatusOptions();
+      renderMetrics();
+      renderList();
+      renderDetail();
+    }
+
+    function renderStatusOptions() {
+      const select = el("statusFilter"), cur = select.value;
+      const statuses = [...new Set(state.tasks.map(t => t.status).filter(v => !empty(v)))].sort();
+      select.replaceChildren(text("option", "전체 상태"));
+      select.firstChild.value = "";
+      statuses.forEach(s => { const o = text("option", s); o.value = s; select.appendChild(o); });
+      select.value = statuses.includes(cur) ? cur : "";
+    }
+
+    function renderMetrics() {
+      const parentIds = new Set(state.tasks.map(t => t.parent).filter(v => !empty(v)));
+      const leafCount = state.tasks.filter(t => !parentIds.has(t.id)).length;
+      const counts = {};
+      state.tasks.forEach(t => { const key = shown(t.status, "미지정"); counts[key] = (counts[key] || 0) + 1; });
+      const box = el("metrics");
+      box.replaceChildren(metric("전체 항목(parent 포함)", state.tasks.length), metric("세부 실행 작업(하위 없음)", leafCount), metric("상태 종류", Object.keys(counts).length), metric("무결성 오류", state.errors.length));
+      Object.entries(counts).forEach(([k,v]) => box.appendChild(metric(`상태: ${k}`, v)));
+      if (state.errors.length) box.appendChild(errorBox(state.errors.join("\n")));
+    }
+
+    function metric(label, value) { const m = document.createElement("div"); m.className = "metric"; m.append(text("span", label, "label"), text("b", String(value))); return m; }
+    function errorBox(msg) { const d = text("div", msg, "notice error"); d.style.gridColumn = "1 / -1"; return d; }
+
+    function filteredTasks() {
+      const status = el("statusFilter").value;
+      const q = el("searchBox").value.trim().toLowerCase();
+      return state.tasks.filter(t => (!status || t.status === status) && (!q || [t.id, t.title, t.description, t.summary].some(v => String(v || "").toLowerCase().includes(q))));
+    }
+
+    function renderList() {
+      const list = el("taskList"), items = filteredTasks();
+      el("shownCount").textContent = `${items.length}개 표시`;
+      if (!state.data) { list.replaceChildren(text("div", "파일을 선택하면 목록이 표시됩니다.", "notice")); return; }
+      if (!items.length) { list.replaceChildren(text("div", "조건에 맞는 작업이 없습니다.", "notice")); return; }
+      list.replaceChildren(...items.map(t => {
+        const b = document.createElement("button"); b.type = "button"; b.className = "task" + (t.id === state.selectedId ? " active" : "");
+        b.append(text("span", shown(t.id, "ID 없음"), "id"), text("span", shown(t.title, "제목 없음"), "title"), text("span", shown(t.status), unknownStatus(t) ? "pill unknown" : "pill"));
+        b.addEventListener("click", () => { state.selectedId = t.id; render(); });
+        return b;
+      }));
+    }
+
+    function unknownStatus(t) { return !(new Set(asArray(state.data && state.data.enums && state.data.enums.status))).has(t.status); }
+    function currentTask() { return state.tasks.find(t => t.id === state.selectedId) || state.tasks[0]; }
+
+    function renderDetail() {
+      const d = el("detail"), t = currentTask();
+      d.replaceChildren();
+      if (!state.data) { d.append(text("div", "기준 백로그 JSON을 먼저 선택하세요.", "notice")); return; }
+      if (!t) { d.append(text("div", "표시할 작업이 없습니다.", "notice")); return; }
+      state.selectedId = t.id; el("detailHint").textContent = shown(t.id, "ID 없음");
+      const fields = [["summary", t.summary, "정보 없음"], ["done_when", t.done_when, "정보 없음"], ["deps", asArray(t.deps).length ? t.deps : null, "미지정"], ["parent", t.parent, "미지정"], ["doc", t.doc, "미지정"], ["where", t.where, "미지정"], ["est_min", t.est_min, "미지정"], ["gate", t.gate, "미지정"], ["owner", t.owner, "미지정"], ["claimed_at", t.claimed_at, "미지정"], ["updated_at", t.updated_at, "정보 없음"], ["log", asArray(t.log), "정보 없음"]];
+      const head = text("h2", `${shown(t.id, "ID 없음")} · ${shown(t.title, "제목 없음")}`);
+      d.append(head);
+      const grid = document.createElement("div"); grid.className = "grid";
+      fields.forEach(([name, value, none]) => grid.append(field(name, value, none)));
+      if (actual(t.done_at)) grid.append(field("done_at", t.done_at, "정보 없음"));
+      if (actual(t.evidence)) grid.append(field("evidence", t.evidence, "정보 없음"));
+      d.append(grid);
+      const doc = state.docs.get(t.id);
+      const docBox = document.createElement("div"); docBox.className = "doc-view";
+      docBox.append(text("strong", `[${t.id}.md] 상세 내역`));
+      docBox.append(doc ? pre(doc) : text("div", "docs/backlog 폴더를 선택하면 같은 ID의 Markdown을 여기에서 볼 수 있습니다.", "notice"));
+      d.append(docBox);
+    }
+
+    function field(name, value, none) {
+      const f = document.createElement("div"); f.className = "field"; f.append(text("strong", name));
+      if (name === "log") f.append(pre(asArray(value).length ? JSON.stringify(value, null, 2) : none));
+      else if (Array.isArray(value) || (value && typeof value === "object")) f.append(pre(JSON.stringify(value, null, 2)));
+      else f.append(text("span", shown(value, none)));
+      return f;
+    }
+    function pre(value) { const p = document.createElement("pre"); p.textContent = value; return p; }
+  </script>
+</body>
+</html>
